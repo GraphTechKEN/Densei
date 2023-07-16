@@ -19,6 +19,7 @@
 #define PIN_Disp_5 A4//ATS白色
 #define PIN_Disp_6 A5//ATS警報
 #define PIN_JyoyoMax 7//常用最大(小田急)
+#define PIN_VPReg 8//電空レギュレータ制御用リレー
 
 //自動ブレーキ関係
 #define Pin_In_BP A0  // Analog input pin that the potentiometer is attached to
@@ -29,9 +30,9 @@
 
 Adafruit_MCP4725 dac;
 
-int16_t FV_v_min = 98;   //102
+int16_t FV_v_min = 100;   //102
 int16_t FV_v_max = 800;  //104
-int16_t BP_v_min = 98;   //106
+int16_t BP_v_min = 100;   //106
 int16_t BP_v_max = 800;  //108
 int16_t BC_p_min = 10;   //110
 int16_t ave_ratio = 95;  //112
@@ -82,7 +83,7 @@ void setup() {
   pinMode(5, INPUT_PULLUP); //連動切替
   pinMode(6, INPUT_PULLUP); //JR/小田急切替
   pinMode(7, OUTPUT); //常用最大ブレーキ作用
-  pinMode(8, OUTPUT); //電空レギュレータ作用
+  pinMode(PIN_VPReg, OUTPUT); //電空レギュレータ作用
   pinMode(12, OUTPUT); //E電磁給排弁作用
 
   pinMode(PIN_Disp_0, OUTPUT); //故障
@@ -101,7 +102,7 @@ void setup() {
   digitalWrite(PIN_Disp_5, 0); //ATS白色
   digitalWrite(PIN_Disp_6, 0); //ATS警報
   digitalWrite(PIN_JyoyoMax, 0); //常用最大ブレーキ作用
-  digitalWrite(8, 0); //電空レギュレータ作用
+  digitalWrite(PIN_VPReg, 0); //電空レギュレータ作用
   digitalWrite(12, 0); //E電磁給排弁作用
 
   dac.begin(0x60);
@@ -352,14 +353,22 @@ void loop() {
   AutoairBrake_Mode = (fBC_press > BC_p_min);
 
   //電空レギュレータ制御 自動ブレーキモードON or 電制ON or 回生(小田急)ON
-  digitalWrite(8, AutoairBrake_Mode || Densei || Oer_Kaisei);
+  digitalWrite(PIN_VPReg, AutoairBrake_Mode || Densei || Oer_Kaisei);
 
-  //電空レギュレータ制御用電圧出力
-  if (Densei) {
-    dac.setVoltage(map(pressure, 0 , 5000 , 0, 4095), false);
-  } else if (AutoairBrake_Mode) {
-    dac.setVoltage(map( (int) (fBC_press * 10) , 0 , 5000 , 0, 4095), false);
+  //電空レギュレータ制御用圧力演算
+  int pressure_reg = 0;
+  if(Densei && AutoairBrake_Mode){
+    pressure_reg = pressure;
+    if(pressure < (int) (fBC_press * 10)){
+      pressure_reg = (int) (fBC_press * 10);
+    }
+  } else if(Densei && !AutoairBrake_Mode){
+    pressure_reg = pressure;
+  } else if(!Densei && AutoairBrake_Mode){
+    pressure_reg = (int) (fBC_press * 10);
   }
+  //電空レギュレータ圧力指令
+  dac.setVoltage(map(pressure_reg, 0 , 5000 , 0, 4095), false);
 
   //BP排気解除条件 EB非動作、ATS非動作、圧力指令に変化があったとき
   if (!EB_JR && EB_JR_latch ) {
