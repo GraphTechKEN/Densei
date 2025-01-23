@@ -1058,7 +1058,7 @@ String rw_eeprom(uint8_t dev, uint16_t* n, uint16_t* param, bool write) {
   return s;
 }
 
-String space_padding(int num, int digit, bool sign) {
+String space_padding(int num, int digit, bool sign...                  ) {
   String s = "";
   if (num < 10000 && digit >= 5) {
     s += " ";
