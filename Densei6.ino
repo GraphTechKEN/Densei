@@ -17,6 +17,7 @@
 //V6.0.0.15 小田急急行対応修正(D-ATS-Pで判定)
 //V6.0.0.16 キー入力上位指令追加
 //V6.0.0.17 ATS電源OFFで抑速と電制がOFFになるバグ修正
+//V6.0.0.18 ATS未投入防止表示灯修正
 
 #include <EEPROM.h>
 #include <Adafruit_MCP4725.h>
@@ -143,6 +144,7 @@ uint16_t ATS_ERR_TIMER = 750;
 uint16_t ATS_P_TIMER = 5000;
 bool flgAtsErr = false;
 bool flgAtsErr_latch = false;
+uint16_t ATS_Mitounyu_Mode = 0;  //ATS未投入防止 (1)警報器(0)警報装置
 
 //E電磁給排弁作用
 unsigned long EB_timer = 0;
@@ -286,13 +288,14 @@ void setup() {
     EEPROM.get(140, ATS_ERR_TIMER);                //ATS-S電源投入時間
     EEPROM.get(142, uintn_BP_velocity_Kyudou_Th);  //急動部作動BP速度しきい値
     EEPROM.get(144, Evalve);                       //A制御弁(0) E制御弁(1)
-    EEPROM.put(146, BC_P_max_E);                   //BC_P_max_E
-    EEPROM.put(148, BC_Multi_E);                   //BC_Multi_E 10倍値
-    EEPROM.put(150, ave_ratio_E);                  //ave_ratio_E
-    EEPROM.put(152, EB_On_delay);                  //EB_On_delay
-    EEPROM.put(154, REG_Off_delay);                //REG_Off_delay
+    EEPROM.get(146, BC_P_max_E);                   //BC_P_max_E
+    EEPROM.get(148, BC_Multi_E);                   //BC_Multi_E 10倍値
+    EEPROM.get(150, ave_ratio_E);                  //ave_ratio_E
+    EEPROM.get(152, EB_On_delay);                  //EB_On_delay
+    EEPROM.get(154, REG_Off_delay);                //REG_Off_delay
     EEPROM.get(180, Unit_disp);
     EEPROM.get(182, Unit_num);
+    EEPROM.get(204, ATS_Mitounyu_Mode);  //ATS未投入防止 (1)警報器(0)警報装置
     BP_velocity_Kyudou_Threshold = (float)uintn_BP_velocity_Kyudou_Th * -0.001;
   }
 
@@ -430,7 +433,7 @@ void loop() {
     if (strbve.length() > 7) {
       uint8_t device = strbve.substring(3, 6).toInt();
       int16_t num = strbve.substring(7, 12).toInt();
-      if (device >= 100 && device < 200) {
+      if ((device >= 100 && device < 200) || device == 204) {
         switch (device) {
           //FV_v_min
           case 102:
@@ -702,6 +705,14 @@ void loop() {
               Unit_num = num;
             }
             break;
+            //ATS未投入防止装置モード
+          case 204:
+            if (num < 0 || num > 4) {
+              s = "E1 " + device;
+            } else {
+              s = rw_eeprom(device, &num, &ATS_Mitounyu_Mode, true);
+            }
+            break;
         }
         if (USB_MON) {
           Serial.println(s);
@@ -749,11 +760,16 @@ void loop() {
     BZ21 = true;
   } else if (strbve.startsWith("ACT 0")) {  //制御基板から警報持続ボタンOFF情報
     BZ21 = false;
-
   } else if (strbve.startsWith("ATSM3")) {
     flgAtsMitounyuBell = true;
   } else if (strbve.startsWith("ATSM2")) {
-    flgAtsMitounyuBell = false;
+    if (ATS_Mitounyu_Mode >> 1 & 1) {
+      flgAtsMitounyuBell = true;
+    } else {
+      flgAtsMitounyuBell = false;
+    }
+  } else if (strbve.startsWith("ATSM1")) {
+      flgAtsMitounyuBell = false;
   } else {
     if (strbve.length() > 35 && lock) {
       //電流符号抽出
@@ -875,7 +891,7 @@ void loop() {
   digitalWrite(PIN_Disp_3, Yokusoku || (Unit3 && Unit_disp) || (Oer_Stop && (TrainMode == 1)));                                                                                                               //抑速 OER:停車
   digitalWrite(PIN_Disp_4, (Densei && !Unit_disp) || (Oer_Kaisei && !(Unit_disp == 2)) || (!Yokusoku && !Densei && Unit1 && !DenryuSign) || (Unit4 && Unit_disp) || (Oer_KaiseiKaihou && (Unit_disp == 2)));  //電制 OER:回生(A)/回生開放(C)
   digitalWrite(PIN_Disp_5, (ATS_Norm && !Ats_Conf && !(Unit_disp == 2)) || (Oer_Pettern && (TrainMode == 1)));                                                                                                //ATS白色 OER:パターン接近
-  digitalWrite(PIN_Disp_6, ATS_ERR || ATS_P_Break && (TrainMode == 0) && (Unit_disp == 2) || (Oer_JyoyoMax && (TrainMode == 1)));                                                                             //ATS警報 ブレーキ動作                                                       //ATS警報 OER:ブレーキ動作
+  digitalWrite(PIN_Disp_6, (((ATS_ERR || (!ATS_Dengen && flgAtsMitounyuBell)) && !Unit_disp) || ATS_P_Break && (Unit_disp == 2)) && (TrainMode == 0) || (Oer_JyoyoMax && (TrainMode == 1)));                  //ATS警報 ブレーキ動作                                                       //ATS警報 OER:ブレーキ動作
   digitalWrite(PIN_Door, door);                                                                                                                                                                               //戸閉灯指示
   digitalWrite(PIN_ATS_BZ21, !BZ21 && ATS_Dengen);                                                                                                                                                            //警報持続ボタン
 
@@ -891,6 +907,7 @@ void loop() {
     }
     digitalWrite(PIN_ATS_ERR, flgAtsErr || (!ATS_Dengen && flgAtsMitounyuBell));
   }
+
   flgAtsErr_latch = flgAtsErr;
   //表示灯制御部ここまで
 
