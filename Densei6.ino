@@ -18,6 +18,8 @@
 //V6.0.0.16 キー入力上位指令追加
 //V6.0.0.17 ATS電源OFFで抑速と電制がOFFになるバグ修正
 //V6.0.0.18 ATS未投入防止表示灯修正
+//V6.0.0.19 EBを'1'以外で反応させない
+//V6.0.1.1 自動ブレーキ不使用時転送OFF、FVを490kPaで固定するか指定可能に変更
 
 #include <EEPROM.h>
 #include <Adafruit_MCP4725.h>
@@ -90,6 +92,8 @@ uint16_t uintn_BP_velocity_Kyudou_Th = 100;
 
 bool AutoairBrake_Mode = false;  //自動ブレーキモード fBC_press圧力が10kPa以上で作動(暫定)
 bool Kyudou = false;
+uint16_t set_AutoAirBrake = 1;  //068 自動帯使用可否 0bit:使用可否 bit1:AutoAirEX bit2:BveEX bit3:直接伝送 bit4:TS185
+bool use_AutoAirBrake = true;
 //自動ブレーキ関係
 
 bool Oer_EB = false;        //EB作動
@@ -166,7 +170,7 @@ unsigned int EB_Count_Off = 0;
 bool MON = false;
 bool USB_MON = false;
 
-//String strbve = "0000/0/ 00000/000000/0000/0";
+//String strbve = "0000/1/ 00000/100000/0000000000000000000001/NN0B08M780C440F490S440P490/";
 String strbve = "";
 
 uint8_t TrainMode = 0;
@@ -188,6 +192,8 @@ bool EB_On_delayed = false;
 bool flg_EB_On_delay = false;
 
 uint16_t REG_Off_delay = 2000;
+
+uint16_t FV_hold = 0;  //FV固定(0:false 1:true)
 
 void setup() {
 
@@ -234,6 +240,7 @@ void setup() {
   uint16_t b = 0;
   EEPROM.get(100, b);
   if (b != 1) {
+    EEPROM.put(68, 1);      //自動帯使用可否 0bit:使用可否 bit1:AutoAirEX bit2:BveEX bit3:直接伝送 bit4:TS185
     EEPROM.put(102, 98);    //FV_v_min
     EEPROM.put(104, 800);   //FV_v_max
     EEPROM.put(106, 98);    //BP_v_min
@@ -261,11 +268,13 @@ void setup() {
     EEPROM.put(150, 0);     //ave_ratio_E
     EEPROM.put(152, 200);   //EB_On_delay
     EEPROM.put(154, 2000);  //REG_Off_delay
+    EEPROM.put(156, 0);     //FV_hold
     EEPROM.put(180, 0);     //Unit_disp
     EEPROM.put(182, 0);     //Unit_num
     //初回書き込みフラグセット
     EEPROM.put(100, b = 1);
   } else {
+    EEPROM.get(68, set_AutoAirBrake);  //自動帯使用可否 0bit:使用可否 bit1:AutoAirEX bit2:BveEX bit3:直接伝送 bit4:TS185
     EEPROM.get(102, FV_v_min);
     EEPROM.get(104, FV_v_max);
     EEPROM.get(106, BP_v_min);
@@ -293,9 +302,10 @@ void setup() {
     EEPROM.get(150, ave_ratio_E);                  //ave_ratio_E
     EEPROM.get(152, EB_On_delay);                  //EB_On_delay
     EEPROM.get(154, REG_Off_delay);                //REG_Off_delay
-    EEPROM.get(180, Unit_disp);
-    EEPROM.get(182, Unit_num);
-    EEPROM.get(204, ATS_Mitounyu_Mode);  //ATS未投入防止 (1)警報器(0)警報装置
+    EEPROM.get(156, FV_hold);                      //FV_hold (0:false 1:true)
+    EEPROM.get(180, Unit_disp);                    //ユニット表示or電制発電表示タイプ
+    EEPROM.get(182, Unit_num);                     //ユニット表示灯数
+    EEPROM.get(204, ATS_Mitounyu_Mode);            //ATS未投入防止 (1)警報器(0)警報装置
     BP_velocity_Kyudou_Threshold = (float)uintn_BP_velocity_Kyudou_Th * -0.001;
   }
 
@@ -307,8 +317,9 @@ void setup() {
   Serial1.print('\r');
 
   //自動ブレーキ関係
-  fFV_press = map(analogRead(Pin_In_FV), FV_v_min, FV_v_max, FV_P_min, FV_P_max);  //FV制御空気ダメ圧力RAW
-  fBP_press = map(analogRead(Pin_In_BP), BP_v_min, BP_v_max, BP_P_min, BP_P_max);  //fBP_pressブレーキシリンダ圧力RAW
+
+  fFV_press = FV_hold ? 490.0 : map(analogRead(Pin_In_FV), FV_v_min, FV_v_max, FV_P_min, FV_P_max);  //FV制御空気ダメ圧力RAW
+  fBP_press = map(analogRead(Pin_In_BP), BP_v_min, BP_v_max, BP_P_min, BP_P_max);                    //fBP_pressブレーキシリンダ圧力RAW
   //自動ブレーキ関係
 }
 
@@ -349,9 +360,11 @@ void loop() {
     Dengen_Count_Off++;
     Dengen_Count_On = 0;
   }
-  if (Dengen_Count_On > 10) {
+  if (Dengen_Count_On >= 10) {
+    Dengen_Count_On = 10;
     ATS_Dengen_SW = true;
-  } else if (Dengen_Count_Off > 10) {
+  } else if (Dengen_Count_Off >= 10) {
+    Dengen_Count_Off = 10;
     ATS_Dengen_SW = false;
   }
 
@@ -433,8 +446,16 @@ void loop() {
     if (strbve.length() > 7) {
       uint8_t device = strbve.substring(3, 6).toInt();
       int16_t num = strbve.substring(7, 12).toInt();
-      if ((device >= 100 && device < 200) || device == 204) {
+      if ((device >= 100 && device < 200) || device == 204 || device == 68) {
         switch (device) {
+          case 68:  //自動帯使用可否
+            if (num < 0 || num > 255) {
+              s = "E1 " + String(device);
+            } else {
+              s = rw_eeprom(device, &num, &set_AutoAirBrake, true);
+              use_AutoAirBrake = set_AutoAirBrake & 1;
+            }
+            break;
           //FV_v_min
           case 102:
             if (num < 0 || num > FV_v_max) {
@@ -686,6 +707,15 @@ void loop() {
             }
             break;
 
+            //FV_hold (0:false 1:true)
+          case 156:
+            if (num < 0 || num > 1) {
+              s = "E1 " + String(device);
+            } else {
+              s = rw_eeprom(device, &num, &FV_hold, true);
+            }
+            break;
+
             //Unit_disp
           case 180:
             if (num < 0 || num > 255) {
@@ -769,9 +799,9 @@ void loop() {
       flgAtsMitounyuBell = false;
     }
   } else if (strbve.startsWith("ATSM1")) {
-      flgAtsMitounyuBell = false;
+    flgAtsMitounyuBell = false;
   } else {
-    if (strbve.length() > 35 && lock) {
+    if (strbve.length() > 35 && lock && strbve.charAt(4) == '/' && strbve.charAt(6) == '/') {
       //電流符号抽出
       DenryuSign = (strbve.substring(7, 8) != "-");
 
@@ -827,7 +857,7 @@ void loop() {
         Oer_Pettern = false;
         Oer_KaiseiKaihou = false;
         //EB抽出
-        EB_JR = strbve.substring(16, 17).toInt();  //EB(JR)
+        EB_JR = (strbve.charAt(16) == '1');  //EB(JR)
 
         //電制(JR)抽出
         Densei = strbve.substring(18, 19).toInt();
@@ -938,13 +968,13 @@ void loop() {
     ave_ratio = ave_ratio_E;
   }
 
-  int16_t FV_sens = analogRead(Pin_In_FV);
+  int16_t FV_sens = FV_hold ? 0 : analogRead(Pin_In_FV);
   int16_t BP_sens = analogRead(Pin_In_BP);
-  iFV_press_temp = map(FV_sens, FV_v_min, FV_v_max, FV_P_min, FV_P_max);  //FV圧力値変換
-  iBP_press_temp = map(BP_sens, BP_v_min, BP_v_max, BP_P_min, BP_P_max);  //BP圧力値変換
+  iFV_press_temp = FV_hold ? 490 : map(FV_sens, FV_v_min, FV_v_max, FV_P_min, FV_P_max);  //FV圧力値変換
+  iBP_press_temp = map(BP_sens, BP_v_min, BP_v_max, BP_P_min, BP_P_max);                  //BP圧力値変換
   float a = (float)ave_ratio * 0.01;
-  fFV_press = a * fFV_press + (1.00 - a) * (float)iFV_press_temp;  //FV圧力値を移動平均化
-  fBP_press = a * fBP_press + (1.00 - a) * (float)iBP_press_temp;  //BP圧力値を移動平均化
+  fFV_press = FV_hold ? 490.0 : a * fFV_press + (1.00 - a) * (float)iFV_press_temp;  //FV圧力値を移動平均化
+  fBP_press = a * fBP_press + (1.00 - a) * (float)iBP_press_temp;                    //BP圧力値を移動平均化
 
   if ((millis() - BP_timer) > 50) {
     BP_velocity = (fBP_press - fBP_press_latch) / (float)(millis() - BP_timer) * 0.1 + BP_velocity_latch * 0.9;
@@ -1130,13 +1160,15 @@ void loop() {
 
     //上位にBCを伝送する
   } else {
-    BC_press = (int)fBC_press;
-    if ((millis() - BC_press_timer > 50) && (abs(BC_press - BC_press_latch) > 3) || (BC_press != BC_press_latch) && (BC_press == 0)) {
-      BC_press_timer = millis();
-      Serial1.print("BC ");
-      Serial1.print(space_padding(BC_press, 3, false));
-      Serial1.print('\r');
-      BC_press_latch = BC_press;
+    if (use_AutoAirBrake) {
+      BC_press = (int)fBC_press;
+      if ((millis() - BC_press_timer > 50) && (abs(BC_press - BC_press_latch) > 3) || (BC_press != BC_press_latch) && (BC_press == 0)) {
+        BC_press_timer = millis();
+        Serial1.print("BC ");
+        Serial1.print(space_padding(BC_press, 3, false));
+        Serial1.print('\r');
+        BC_press_latch = BC_press;
+      }
     }
   }
 
